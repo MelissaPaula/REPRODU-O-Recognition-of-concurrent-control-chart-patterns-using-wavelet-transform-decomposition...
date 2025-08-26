@@ -1,0 +1,170 @@
+#implementação com kernel linear
+!pip install PyWavelets pyswarms
+
+import numpy as np
+import pandas as pd
+import pywt
+from sklearn import svm
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Geração dos padrões compostos
+def generate_all_patterns(length=64, sigma_range=(0, 5)):
+    sigma = np.random.uniform(*sigma_range)
+    N_t = np.random.normal(0, sigma, length)
+    start_i, start_j = sorted(np.random.choice(np.arange(10, length - 10), 2, replace=False))
+
+    patterns = {
+        'u.s. + i.t.': np.concatenate([np.zeros(start_i), np.ones(length-start_i) * np.random.uniform(1.75, 2.5)*sigma]) + np.concatenate([np.zeros(start_j), np.arange(length-start_j)*np.random.uniform(0.1, 0.2)*sigma]),
+        'd.s. + d.t.': np.concatenate([np.zeros(start_i), np.ones(length-start_i) * np.random.uniform(-2.5, -1.75)*sigma]) + np.concatenate([np.zeros(start_j), np.arange(length-start_j)*np.random.uniform(-0.2, -0.1)*sigma]),
+        'i.t. + c.p.': np.concatenate([np.zeros(start_i), np.arange(length-start_i)*np.random.uniform(0.1, 0.2)*sigma]) + np.sin(np.linspace(0, 2*np.pi*length/0.8, length))*np.random.uniform(2,2.5)*sigma,
+        'd.t. + c.p.': np.concatenate([np.zeros(start_i), np.arange(length-start_i)*np.random.uniform(-0.2, -0.1)*sigma]) + np.sin(np.linspace(0, 2*np.pi*length/0.8, length))*np.random.uniform(2,2.5)*sigma,
+        'u.s. + c.p.': np.concatenate([np.zeros(start_i), np.ones(length-start_i)*np.random.uniform(1.75, 2.5)*sigma]) + np.sin(np.linspace(0, 2*np.pi*length/0.8, length))*np.random.uniform(2,2.5)*sigma,
+        'd.s. + c.p.': np.concatenate([np.zeros(start_i), np.ones(length-start_i)*np.random.uniform(-2.5, -1.75)*sigma]) + np.sin(np.linspace(0, 2*np.pi*length/0.8, length))*np.random.uniform(2,2.5)*sigma,
+        'u.s. + s.p.': np.concatenate([np.zeros(start_i), np.ones(length-start_i)*np.random.uniform(1.75, 2.5)*sigma]) + np.array([(-1)**i for i in range(length)])*np.random.uniform(1.5, 3)*sigma,
+        'd.s. + s.p.': np.concatenate([np.zeros(start_i), np.ones(length-start_i)*np.random.uniform(-2.5, -1.75)*sigma]) + np.array([(-1)**i for i in range(length)])*np.random.uniform(1.5, 3)*sigma,
+        'normal': N_t
+    }
+
+    for key in patterns:
+        if key != 'normal':
+            patterns[key] += N_t
+
+    return patterns
+
+# Padrões simples
+def generate_simple_pattern(label, sigma_range=(0, 5), length=64):
+    sigma = np.random.uniform(*sigma_range)
+    N_t = np.random.normal(0, sigma, length)
+    if label == 'u.s.':
+        pattern = np.concatenate([np.zeros(20), np.ones(length - 20) * np.random.uniform(1.75, 2.5) * sigma])
+    elif label == 'd.s.':
+        pattern = np.concatenate([np.zeros(20), np.ones(length - 20) * np.random.uniform(-2.5, -1.75) * sigma])
+    elif label == 'i.t.':
+        pattern = np.concatenate([np.zeros(20), np.arange(length - 20) * np.random.uniform(0.1, 0.2) * sigma])
+    elif label == 'd.t.':
+        pattern = np.concatenate([np.zeros(20), np.arange(length - 20) * np.random.uniform(-0.2, -0.1) * sigma])
+    elif label == 'c.p.':
+        pattern = np.sin(np.linspace(0, 2 * np.pi * length / 0.8, length)) * np.random.uniform(2, 2.5) * sigma
+    elif label == 's.p.':
+        pattern = np.array([(-1)**i for i in range(length)]) * np.random.uniform(1.5, 3) * sigma
+    else:
+        pattern = N_t
+    return pattern + N_t
+
+# Dataset
+sample_config = {
+    'u.s. + i.t.': 30, 'd.s. + d.t.': 30, 'i.t. + c.p.': 60, 'd.t. + c.p.': 60,
+    'u.s. + c.p.': 80, 'd.s. + c.p.': 80, 'u.s. + s.p.': 64, 'd.s. + s.p.': 64, 'normal': 64,
+    'u.s.': 64, 'd.s.': 64, 'i.t.': 64, 'd.t.': 64, 'c.p.': 64, 's.p.': 64
+}
+
+length = 64
+X_data, y_data = [], []
+for label, n_samples in sample_config.items():
+    for _ in range(n_samples):
+        if label in ['u.s.', 'd.s.', 'i.t.', 'd.t.', 'c.p.', 's.p.', 'normal']:
+            X_data.append(generate_simple_pattern(label, length=length))
+        else:
+            X_data.append(generate_all_patterns(length=length)[label])
+        y_data.append(label)
+
+X_data = np.array(X_data)
+y_data = np.array(y_data)
+
+# Decomposição Haar
+def haar_decomposition(data, wavelet='haar', level=6):
+    decomposed_data = []
+    for signal in data:
+        coeffs = pywt.wavedec(signal, wavelet, level=level)
+        decomposed_signal = np.concatenate(coeffs)
+        decomposed_data.append(decomposed_signal)
+    return np.array(decomposed_data)
+
+X_data_haar = haar_decomposition(X_data, wavelet='haar', level=3)
+X_train, X_test, y_train, y_test = train_test_split(X_data_haar, y_data, test_size=0.2, random_state=42)
+
+# PSO infra
+class Particle:
+    def __init__(self, bounds):
+        self.position = np.array([np.random.uniform(low, high) for low, high in bounds])
+        self.velocity = np.random.uniform(-4, 4, len(bounds))
+        self.best_pos = np.copy(self.position)
+        self.best_err = float('inf')
+        self.err = float('inf')
+
+def pso(objective_func, bounds, num_particles, maxiter):
+    swarm = [Particle(bounds) for _ in range(num_particles)]
+    global_best_pos = np.zeros(len(bounds))
+    global_best_err = float('inf')
+
+    for _ in range(maxiter):
+        for particle in swarm:
+            particle.err = objective_func(particle.position)
+            if particle.err < particle.best_err:
+                particle.best_err = particle.err
+                particle.best_pos = particle.position.copy()
+            if particle.err < global_best_err:
+                global_best_err = particle.err
+                global_best_pos = particle.position.copy()
+        for particle in swarm:
+            wp = np.random.uniform(0.2, 0.8)
+            r1, r2 = np.random.rand(2)
+            cognitive = r1 * (particle.best_pos - particle.position)
+            social = r2 * (global_best_pos - particle.position)
+            particle.velocity = wp * particle.velocity + cognitive + social
+            particle.velocity = np.clip(particle.velocity, -4, 4)
+            particle.position += particle.velocity
+            particle.position = np.clip(particle.position, [b[0] for b in bounds], [b[1] for b in bounds])
+    return global_best_pos, global_best_err
+
+# Função objetivo — SVM Linear
+def svm_fitness_linear(params):
+    C = params[0]
+    try:
+        clf = svm.SVC(C=C, kernel='linear')
+        clf.fit(X_train, y_train)
+        preds = clf.predict(X_train)
+        return 1 - accuracy_score(y_train, preds)
+    except Exception:
+        return 1
+
+# PSO para kernel linear
+bounds_linear = [(1e-2, 1e3)]
+best_pos_linear, _ = pso(svm_fitness_linear, bounds_linear, num_particles=30, maxiter=30)
+C_linear = best_pos_linear[0]
+
+# Modelo final
+model_linear = svm.SVC(kernel='linear', C=C_linear)
+model_linear.fit(X_train, y_train)
+y_pred_linear = model_linear.predict(X_test)
+
+# Avaliação
+def evaluate_model(model, X_test, y_test, y_pred, best_params):
+    print("\n SVM LINEAR – Parâmetros otimizados:")
+    for k, v in best_params.items():
+        print(f"{k} = {v:.4f}" if isinstance(v, float) else f"{k} = {v}")
+    accuracy = accuracy_score(y_test, y_pred)
+    print(f"\nAcurácia: {accuracy * 100:.2f}%")
+
+    labels = np.unique(y_test)
+    cm = confusion_matrix(y_test, y_pred, labels=labels)
+    cm_percent = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis] * 100
+
+    print("\n Matriz de Confusão (%):")
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(cm_percent, annot=True, fmt=".1f", cmap="Greens",
+                xticklabels=labels, yticklabels=labels)
+    plt.ylabel('Classe real')
+    plt.xlabel('Classe predita')
+    plt.title('Matriz de Confusão – SVM Linear (%)')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
+    print("\n Relatório de Classificação:")
+    print(classification_report(y_test, y_pred))
+
+evaluate_model(model_linear, X_test, y_test, y_pred_linear, {'C': C_linear})
